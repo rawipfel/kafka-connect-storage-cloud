@@ -95,6 +95,80 @@ NO compatibility, BACKWARD compatibility, FORWARD compatibility and FULL compati
 
 Schema evolution in the S3 connector works in the same way as in the `HDFS connector <../../../connect-hdfs/docs/hdfs_connector.html#schema-evolution>`_.
   
+Automatic Retries
+-----------------
+The S3 connector may experience problems writing to the S3 bucket, due to network partitions,
+interruptions, or even AWS throttling limits. In many cases,
+the connector will retry the request a number of times before failing.
+To prevent from further overloading the network or S3 service,
+the connector uses an exponential backoff technique to give the network and/or service time to recover.
+The technique adds randomness, called jitter, to the calculated backoff times to prevent a thundering herd,
+where large numbers of requests from many tasks are submitted concurrently and overwhelm the service.
+Randomness spreads out the retries from many tasks and should reduce the overall time required
+to complete all outstanding requests compared to simple exponential backoff.
+The goal is to spread out the requests to S3 as much as possible.
+
+The maximum number of retry attempts is dictated by the ``s3.part.retries`` S3 connector
+configuration property,
+which defaults to 3 attempts. The delay for retries is dependent upon the connector's ``s3.retry.backoff.ms``
+configuration property, which defaults to 200 milliseconds. The actual delay is randomized,
+but the maximum delay can be calculated as a function of the number of retry attempts with ``${s3.retry.backoff.ms} * 2 ^ (retry-1)``,
+where ``retry`` is the number of attempts taken so far in the current iteration.
+In order to keep the maximum delay within a reasonable duration, it is capped at 24 hours.
+For example, the following table shows the possible wait times
+before submitting each of the 3 retry attempts:
+
+.. table:: Range of backoff times for each retry using the default configuration
+   :widths: auto
+
+   =====  =====================  =====================  ==============================================
+   Retry  Minimum Backoff (sec)  Maximum Backoff (sec)  Total Potential Delay from First Attempt (sec)
+   =====  =====================  =====================  ==============================================
+     1         0.0                      0.2                              0.2
+     2         0.0                      0.4                              0.6
+     3         0.0                      0.8                              1.4
+   =====  =====================  =====================  ==============================================
+
+Increasing the maximum number of retries adds more backoff:
+
+.. table:: Range of backoff times for additional retries
+   :widths: auto
+
+   =====  =====================  =====================  ==============================================
+   Retry  Minimum Backoff (sec)  Maximum Backoff (sec)  Total Potential Delay from First Attempt (sec)
+   =====  =====================  =====================  ==============================================
+     4         0.0                      1.6                              3.0
+     5         0.0                      3.2                              6.2
+     6         0.0                      6.4                             12.6
+     7         0.0                     12.8                             25.4
+     8         0.0                     25.6                             51.0
+     9         0.0                     51.2                            102.2
+    10         0.0                    102.4                            204.6
+   =====  =====================  =====================  ==============================================
+
+At some point, maximum backoff time will reach saturation and will be capped at 24 hours.
+From the example below, all attempts starting with 20 will have maximum backoff time as 24 hours:
+
+.. table:: Range of backoff times when reaching the cap of 24 hours
+   :widths: auto
+
+   =====  =====================  =====================  ==============================================
+   Retry  Minimum Backoff (sec)  Maximum Backoff (sec)  Total Potential Delay from First Attempt (sec)
+   =====  =====================  =====================  ==============================================
+    15         0.0                   3276.8                             6553.4
+    16         0.0                   6553.6                            13107.0
+    17         0.0                  13107.2                            26214.2
+    18         0.0                  26214.4                            52428.6
+    19         0.0                  52428.8                           104857.4
+    20         0.0                  86400.0                           191257.4
+    21         0.0                  86400.0                           277657.4
+   =====  =====================  =====================  ==============================================
+
+It's not advised to set ``s3.part.retries`` too high since making more attempts after reaching a cap of 24 hours isn't practical.
+You can adjust both the ``s3.part.retries`` and ``s3.retry.backoff.ms`` connector configuration
+properties to achieve
+the desired retry and backoff characteristics.
+
 Quickstart
 ----------
 In this Quickstart, we use the S3 connector to export data produced by the Avro console producer to S3.
@@ -122,6 +196,8 @@ Every service will start in order, printing a message with its status:
 .. note:: You need to make sure the connector user has write access to the S3 bucket
    specified in ``s3.bucket.name`` and has deployed credentials
    `appropriately <http://docs.aws.amazon.com/sdk-for-java/v1/developer-guide/credentials.html>`_.
+   You can also pass additional properties to credentials provider, please refer to the
+   `Configurable credentials provider`_ section.
 
 To import a few records with a simple schema in Kafka, start the Avro console producer as follows:
 
@@ -250,6 +326,17 @@ Configuration
 -------------
 This section gives example configurations that cover common scenarios. For detailed description of all the
 available configuration options of the S3 connector go to :ref:`Configuration Options<s3_configuration_options>`
+
+Configurable credentials provider
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+Some use cases require more fine-grained credentials configuration for AWS so that each connector
+could have its own credentials.
+
+To use a configurable credentials provider, set the ``s3.credentials.provider.class``
+to the name of a class that implements both the ``com.amazonaws.auth.AWSCredentialsProvider``
+and ``org.apache.kafka.common.Configurable`` interfaces.
+Then as needed, supply additional properties required by that provider by prefixing them
+with ``s3.credentials.provider.``. These will all be passed to the credentials provider during configuration.
 
 Basic Example
 ~~~~~~~~~~~~~

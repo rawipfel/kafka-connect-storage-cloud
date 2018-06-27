@@ -14,7 +14,7 @@
  * limitations under the License.
  */
 
-package io.confluent.connect.s3;
+package io.confluent.connect.s3.storage;
 
 import com.amazonaws.ClientConfiguration;
 import com.amazonaws.Protocol;
@@ -25,12 +25,13 @@ import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.ExpectedException;
-import org.mockito.Matchers;
+import org.mockito.ArgumentMatchers;
 
 import java.util.HashMap;
 import java.util.Map;
 
-import io.confluent.connect.s3.storage.S3Storage;
+import io.confluent.connect.s3.S3SinkConnectorConfig;
+import io.confluent.connect.s3.S3SinkConnectorTestBase;
 
 import static org.junit.Assert.assertEquals;
 
@@ -80,7 +81,7 @@ public class S3ProxyTest extends S3SinkConnectorTestBase {
     localProps.put(S3SinkConnectorConfig.S3_PROXY_URL_CONFIG, "localhost");
     setUp();
     thrown.expect(ConfigException.class);
-    thrown.expectMessage(Matchers.contains("no protocol: localhost"));
+    thrown.expectMessage(ArgumentMatchers.contains("no protocol: localhost"));
     clientConfig = storage.newClientConfiguration(connectorConfig);
   }
 
@@ -89,7 +90,7 @@ public class S3ProxyTest extends S3SinkConnectorTestBase {
     localProps.put(S3SinkConnectorConfig.S3_PROXY_URL_CONFIG, "unknown://localhost");
     setUp();
     thrown.expect(ConfigException.class);
-    thrown.expectMessage(Matchers.contains("unknown protocol: localhost"));
+    thrown.expectMessage(ArgumentMatchers.contains("unknown protocol: localhost"));
     clientConfig = storage.newClientConfiguration(connectorConfig);
   }
 

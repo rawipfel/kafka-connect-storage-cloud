@@ -22,6 +22,7 @@ import com.amazonaws.regions.RegionUtils;
 import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.model.CannedAccessControlList;
 import com.amazonaws.services.s3.model.SSEAlgorithm;
+import org.apache.kafka.common.Configurable;
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigDef.Importance;
@@ -40,6 +41,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 import io.confluent.connect.s3.format.avro.AvroFormat;
 import io.confluent.connect.s3.format.json.JsonFormat;
@@ -58,6 +60,8 @@ import io.confluent.connect.storage.partitioner.HourlyPartitioner;
 import io.confluent.connect.storage.partitioner.PartitionerConfig;
 import io.confluent.connect.storage.partitioner.TimeBasedPartitioner;
 
+import static org.apache.kafka.common.config.ConfigDef.Range.atLeast;
+
 public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
 
   // S3 Group
@@ -65,6 +69,9 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
 
   public static final String SSEA_CONFIG = "s3.ssea.name";
   public static final String SSEA_DEFAULT = "";
+
+  public static final String SSE_CUSTOMER_KEY = "s3.sse.customer.key";
+  public static final Password SSE_CUSTOMER_KEY_DEFAULT = new Password(null);
 
   public static final String SSE_KMS_KEY_ID_CONFIG = "s3.sse.kms.key.id";
   public static final String SSE_KMS_KEY_ID_DEFAULT = "";
@@ -78,6 +85,15 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
   public static final String CREDENTIALS_PROVIDER_CLASS_CONFIG = "s3.credentials.provider.class";
   public static final Class<? extends AWSCredentialsProvider> CREDENTIALS_PROVIDER_CLASS_DEFAULT =
       DefaultAWSCredentialsProviderChain.class;
+  /**
+   * The properties that begin with this prefix will be used to configure a class, specified by
+   * {@code s3.credentials.provider.class} if it implements {@link Configurable}.
+   */
+  public static final String CREDENTIALS_PROVIDER_CONFIG_PREFIX =
+      CREDENTIALS_PROVIDER_CLASS_CONFIG.substring(
+          0,
+          CREDENTIALS_PROVIDER_CLASS_CONFIG.lastIndexOf(".") + 1
+      );
 
   public static final String REGION_CONFIG = "s3.region";
   public static final String REGION_DEFAULT = Regions.DEFAULT_REGION.getName();
@@ -105,6 +121,14 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
 
   public static final String S3_PROXY_PASS_CONFIG = "s3.proxy.password";
   public static final Password S3_PROXY_PASS_DEFAULT = new Password(null);
+
+  /**
+   * Maximum back-off time when retrying failed requests.
+   */
+  public static final int S3_RETRY_MAX_BACKOFF_TIME_MS = (int) TimeUnit.HOURS.toMillis(24);
+
+  public static final String S3_RETRY_BACKOFF_CONFIG = "s3.retry.backoff.ms";
+  public static final int S3_RETRY_BACKOFF_DEFAULT = 200;
 
   private final String name;
 
@@ -222,6 +246,18 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
       );
 
       configDef.define(
+          SSE_CUSTOMER_KEY,
+          Type.PASSWORD,
+          SSE_CUSTOMER_KEY_DEFAULT,
+          Importance.LOW,
+          "The S3 Server Side Encryption Customer-Provided Key (SSE-C).",
+          group,
+          ++orderInGroup,
+          Width.LONG,
+          "S3 Server Side Encryption Customer-Provided Key (SSE-C)"
+      );
+
+      configDef.define(
           SSE_KMS_KEY_ID_CONFIG,
           Type.STRING,
           SSE_KMS_KEY_ID_DEFAULT,
@@ -281,12 +317,33 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
           S3_PART_RETRIES_CONFIG,
           Type.INT,
           S3_PART_RETRIES_DEFAULT,
+          atLeast(0),
           Importance.MEDIUM,
-          "Number of upload retries of a single S3 part. Zero means no retries.",
+          "Maximum number of retry attempts for failed requests. Zero means no retries. "
+              + "The actual number of attempts is determined by the S3 client based on multiple "
+              + "factors, including, but not limited to - "
+              + "the value of this parameter, type of exception occurred, "
+              + "throttling settings of the underlying S3 client, etc.",
           group,
           ++orderInGroup,
           Width.LONG,
           "S3 Part Upload Retries"
+      );
+
+      configDef.define(
+          S3_RETRY_BACKOFF_CONFIG,
+          Type.LONG,
+          S3_RETRY_BACKOFF_DEFAULT,
+          atLeast(0L),
+          Importance.LOW,
+          "How long to wait in milliseconds before attempting the first retry "
+              + "of a failed S3 request. Upon a failure, this connector may wait up to twice as "
+              + "long as the previous wait, up to the maximum number of retries. "
+              + "This avoids retrying in a tight loop under failure scenarios.",
+          group,
+          ++orderInGroup,
+          Width.SHORT,
+          "Retry Backoff (ms)"
       );
 
       configDef.define(
@@ -412,6 +469,10 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
     return getString(SSEA_CONFIG);
   }
 
+  public String getSseCustomerKey() {
+    return getPassword(SSE_CUSTOMER_KEY).value();
+  }
+
   public String getSseKmsKeyId() {
     return getString(SSE_KMS_KEY_ID_CONFIG);
   }
@@ -427,8 +488,19 @@ public class S3SinkConnectorConfig extends StorageSinkConnectorConfig {
   @SuppressWarnings("unchecked")
   public AWSCredentialsProvider getCredentialsProvider() {
     try {
-      return ((Class<? extends AWSCredentialsProvider>)
-                  getClass(S3SinkConnectorConfig.CREDENTIALS_PROVIDER_CLASS_CONFIG)).newInstance();
+      AWSCredentialsProvider provider = ((Class<? extends AWSCredentialsProvider>)
+          getClass(S3SinkConnectorConfig.CREDENTIALS_PROVIDER_CLASS_CONFIG)).newInstance();
+
+      if (provider instanceof Configurable) {
+        Map<String, Object> configs = originalsWithPrefix(CREDENTIALS_PROVIDER_CONFIG_PREFIX);
+        configs.remove(CREDENTIALS_PROVIDER_CLASS_CONFIG.substring(
+            CREDENTIALS_PROVIDER_CONFIG_PREFIX.length(),
+            CREDENTIALS_PROVIDER_CLASS_CONFIG.length()
+        ));
+        ((Configurable) provider).configure(configs);
+      }
+
+      return provider;
     } catch (IllegalAccessException | InstantiationException e) {
       throw new ConnectException(
           "Invalid class for: " + S3SinkConnectorConfig.CREDENTIALS_PROVIDER_CLASS_CONFIG,
